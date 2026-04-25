@@ -1,0 +1,32 @@
+# VCS
+.git
+.gitignore
+.gitattributes
+
+# Build artifacts
+osbui-panel
+backend/osbui-panel
+frontend/dist
+frontend/.vite
+frontend/node_modules
+
+# Editor / OS junk
+.vscode
+.idea
+*.swp
+.DS_Store
+
+# Logs
+*.log
+tmp-panel.log
+
+# Docs / CI metadata that the image doesn't need
+README.md
+Makefile
+.github
+.claude
+
+# Don't copy the Dockerfile into the build context as a file
+Dockerfile
+docker-compose.yml
+.dockerignore
