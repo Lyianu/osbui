@@ -36,11 +36,12 @@ import { formatDate, formatRelative, shortId } from "@/lib/utils"
 import { useToast } from "@/hooks/use-toast"
 import ConfirmDeleteDialog from "@/components/ConfirmDeleteDialog"
 import FileBrowser from "@/components/sandbox/FileBrowser"
-import Terminal from "@/components/sandbox/Terminal"
+import TerminalTabs from "@/components/sandbox/TerminalTabs"
 import LogsPanel from "@/components/sandbox/LogsPanel"
 import PortsPanel from "@/components/sandbox/PortsPanel"
 import MetricsPanel from "@/components/sandbox/MetricsPanel"
 import GitImportDialog from "@/components/sandbox/GitImportDialog"
+import ServicesPanel from "@/components/sandbox/ServicesPanel"
 import { CopyButton } from "@/components/CopyButton"
 import { addTemplate } from "@/lib/templates"
 
@@ -250,6 +251,7 @@ export default function SandboxDetailPage() {
               <TabsTrigger value="terminal">
                 <TerminalIcon className="mr-1 h-3.5 w-3.5" /> Terminal
               </TabsTrigger>
+              <TabsTrigger value="services">Services</TabsTrigger>
               <TabsTrigger value="ports">
                 <Network className="mr-1 h-3.5 w-3.5" /> Ports
               </TabsTrigger>
@@ -452,9 +454,17 @@ export default function SandboxDetailPage() {
 
             <TabsContent value="terminal">
               {sandbox.status.state === "Running" ? (
-                <Terminal sandboxId={id} />
+                <TerminalTabs sandboxId={id} />
               ) : (
                 <DisabledPanel>Terminal requires a Running sandbox.</DisabledPanel>
+              )}
+            </TabsContent>
+
+            <TabsContent value="services">
+              {sandbox.status.state === "Running" ? (
+                <ServicesPanel sandboxId={id} />
+              ) : (
+                <DisabledPanel>Services require a Running sandbox.</DisabledPanel>
               )}
             </TabsContent>
 

@@ -114,9 +114,9 @@ export default function Terminal({ sandboxId }: { sandboxId: string }) {
   }, [sandboxId])
 
   return (
-    <div className="flex h-[500px] flex-col gap-2">
+    <div className="flex h-full min-h-[400px] flex-col gap-2">
       <div className="flex items-center justify-between text-xs text-muted-foreground">
-        <span>bash session · commands are sent on Enter, line-editing via Backspace</span>
+        <span>bash session · commands sent on Enter, line-editing via Backspace</span>
         <button
           className="rounded border px-2 py-0.5 hover:bg-accent"
           onClick={() => termRef.current?.clear()}

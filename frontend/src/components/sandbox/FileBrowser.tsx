@@ -56,6 +56,11 @@ export default function FileBrowser({ sandboxId }: { sandboxId: string }) {
     setSelected(entry)
     setEditingContent(null)
     setDirty(false)
+    // Skip reading binary types — render in a preview pane.
+    const kind = fileKind(entry.name)
+    if (kind === "image" || kind === "binary") {
+      return
+    }
     if (entry.size > 2 * 1024 * 1024) {
       toast({
         title: "Too large to edit inline",
@@ -325,21 +330,46 @@ export default function FileBrowser({ sandboxId }: { sandboxId: string }) {
                   </Button>
                 </div>
               </div>
-              {editingContent === null ? (
-                <div className="flex flex-1 items-center justify-center text-xs text-muted-foreground">
-                  <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Loading…
-                </div>
-              ) : (
-                <textarea
-                  className="flex-1 resize-none rounded-md border bg-background p-2 font-mono text-xs outline-none focus:ring-1 focus:ring-ring"
-                  value={editingContent}
-                  onChange={(e) => {
-                    setEditingContent(e.target.value)
-                    setDirty(true)
-                  }}
-                  spellCheck={false}
-                />
-              )}
+              {(() => {
+                const kind = fileKind(selected.name)
+                if (kind === "image") {
+                  return (
+                    <div className="flex flex-1 items-center justify-center overflow-auto rounded-md border bg-muted/40 p-2">
+                      <img
+                        src={api.downloadFileUrl(sandboxId, joinPath(path, selected.name))}
+                        alt={selected.name}
+                        className="max-h-full max-w-full object-contain"
+                      />
+                    </div>
+                  )
+                }
+                if (kind === "binary") {
+                  return (
+                    <div className="flex flex-1 flex-col items-center justify-center gap-2 rounded-md border bg-muted/30 text-xs text-muted-foreground">
+                      <FileIcon className="h-8 w-8" />
+                      <span>Binary file ({formatBytes(selected.size)}) — use Download to inspect.</span>
+                    </div>
+                  )
+                }
+                if (editingContent === null) {
+                  return (
+                    <div className="flex flex-1 items-center justify-center text-xs text-muted-foreground">
+                      <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Loading…
+                    </div>
+                  )
+                }
+                return (
+                  <textarea
+                    className="flex-1 resize-none rounded-md border bg-background p-2 font-mono text-xs outline-none focus:ring-1 focus:ring-ring"
+                    value={editingContent}
+                    onChange={(e) => {
+                      setEditingContent(e.target.value)
+                      setDirty(true)
+                    }}
+                    spellCheck={false}
+                  />
+                )
+              })()}
             </>
           ) : (
             <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
@@ -404,6 +434,16 @@ function pathCrumbs(p: string) {
     crumbs.push({ name: part, full })
   }
   return crumbs
+}
+
+type FileKind = "text" | "image" | "binary"
+function fileKind(name: string): FileKind {
+  const lower = name.toLowerCase()
+  if (/\.(png|jpe?g|gif|webp|bmp|svg|ico|avif)$/.test(lower)) return "image"
+  // Binary-looking extensions get a download-only state. Everything else is
+  // treated as text — execd's download is permissive about content.
+  if (/\.(zip|tar|gz|tgz|xz|bz2|7z|rar|jar|war|class|so|dll|exe|bin|wasm|woff2?|ttf|otf|mp[34]|mkv|mov|avi|webm|pdf|psd|sqlite3?|db|deb|rpm|iso)$/.test(lower)) return "binary"
+  return "text"
 }
 
 function formatBytes(n: number) {
