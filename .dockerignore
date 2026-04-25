@@ -1,0 +1,10 @@
+.git
+.github
+.idea
+.vscode
+**/node_modules
+**/dist
+**/.vite
+**/*.tsbuildinfo
+*.log
+osbui-panel

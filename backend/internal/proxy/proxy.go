@@ -333,22 +333,12 @@ type ExecResult struct {
 }
 
 // ResolveExecdBase returns the base URL (scheme+host) of the sandbox's execd.
-// It prefers the sandbox metadata key `opensandbox.io/embedding-proxy-port`
-// and falls back to resolving an arbitrary port and stripping the `/proxy/<p>`
-// suffix.
+// It uses an arbitrary port resolution so the host the OpenSandbox server is
+// configured to advertise (`[docker].host_ip`) flows through unchanged. This
+// matters when the panel runs in a container alongside the upstream — the
+// panel must reach sandbox-exposed ports through `host.docker.internal` /
+// the host gateway, not its own loopback.
 func (p *Proxy) ResolveExecdBase(r *http.Request, sandboxID string) (*url.URL, error) {
-	type sandbox struct {
-		Metadata map[string]string `json:"metadata"`
-	}
-	var sb sandbox
-	resp, err := p.DoUpstream(r, http.MethodGet, fmt.Sprintf("/v1/sandboxes/%s", sandboxID), nil, &sb)
-	if err == nil && resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		if port, ok := sb.Metadata["opensandbox.io/embedding-proxy-port"]; ok && port != "" {
-			if u, err := url.Parse("http://127.0.0.1:" + port); err == nil {
-				return u, nil
-			}
-		}
-	}
 	entry, err := p.resolveEndpoint(r, sandboxID, "65535")
 	if err != nil {
 		return nil, fmt.Errorf("resolve execd base: %w", err)

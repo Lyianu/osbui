@@ -293,13 +293,23 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ path }),
     }),
-  uploadFiles: async (id: string, targetDir: string, files: File[]) => {
+  uploadFiles: async (
+    id: string,
+    targetDir: string,
+    files: File[],
+    opts?: { paths?: string[]; signal?: AbortSignal }
+  ) => {
     const fd = new FormData()
     fd.append("path", targetDir)
-    files.forEach((f) => fd.append("files", f, f.name))
+    files.forEach((f, i) => {
+      fd.append("files", f, f.name)
+      const rel = opts?.paths?.[i] ?? (f as File & { webkitRelativePath?: string }).webkitRelativePath ?? f.name
+      fd.append("paths", rel)
+    })
     const res = await fetch(`/panel/sandboxes/${id}/files/upload`, {
       method: "POST",
       body: fd,
+      signal: opts?.signal,
     })
     if (!res.ok) throw new ApiError(res.status, await res.text())
     return res.json() as Promise<{ uploaded: any[]; targetDir: string }>

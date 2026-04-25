@@ -1,6 +1,6 @@
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { useMutation, useQuery } from "@tanstack/react-query"
-import { ChevronDown, ChevronRight, Loader2, Plus, X } from "lucide-react"
+import { ChevronDown, ChevronRight, FolderUp, Loader2, Plus, X } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import {
   Dialog,
@@ -59,6 +59,12 @@ export default function CreateSandboxDialog({
   // Advanced — volumes
   const [volumes, setVolumes] = useState<Volume[]>([])
 
+  // Local folder import: list of File objects + their webkitRelativePaths.
+  const [importFiles, setImportFiles] = useState<File[]>([])
+  const [importTarget, setImportTarget] = useState("/workspace")
+  const [importing, setImporting] = useState<{ done: number; total: number } | null>(null)
+  const folderInputRef = useRef<HTMLInputElement | null>(null)
+
   const snapshotsQuery = useQuery({
     queryKey: ["snapshots", "list-for-create"],
     queryFn: () => api.listSnapshots({ pageSize: 100 }),
@@ -87,6 +93,51 @@ export default function CreateSandboxDialog({
     }
     if (prefill) setTemplateId(prefill.id)
   }, [templateId, templates, prefill])
+
+  // Wait for the sandbox to reach Running before uploading files.
+  const waitForRunning = async (sandboxId: string, timeoutMs = 120_000) => {
+    const deadline = Date.now() + timeoutMs
+    while (Date.now() < deadline) {
+      try {
+        const sb = await api.getSandbox(sandboxId)
+        if (sb.status?.state === "Running") return
+        if (sb.status?.state === "Failed" || sb.status?.state === "Terminated") {
+          throw new Error(`sandbox transitioned to ${sb.status.state}`)
+        }
+      } catch {}
+      await new Promise((r) => setTimeout(r, 1500))
+    }
+    throw new Error("timed out waiting for sandbox to reach Running")
+  }
+
+  const uploadInBatches = async (
+    sandboxId: string,
+    files: File[],
+    target: string,
+    onProgress?: (done: number, total: number) => void
+  ) => {
+    const total = files.length
+    if (total === 0) return
+    // Upload in chunks of ~50 files / ~32 MB to keep request size sane.
+    const CHUNK_FILES = 50
+    const CHUNK_BYTES = 32 * 1024 * 1024
+    let done = 0
+    let i = 0
+    while (i < files.length) {
+      let bytes = 0
+      let j = i
+      while (j < files.length && j - i < CHUNK_FILES && bytes < CHUNK_BYTES) {
+        bytes += files[j].size
+        j++
+      }
+      const slice = files.slice(i, j)
+      const paths = slice.map((f) => (f as File & { webkitRelativePath?: string }).webkitRelativePath || f.name)
+      await api.uploadFiles(sandboxId, target, slice, { paths })
+      done += slice.length
+      onProgress?.(done, total)
+      i = j
+    }
+  }
 
   const createMut = useMutation({
     mutationFn: async (): Promise<string> => {
@@ -147,6 +198,20 @@ export default function CreateSandboxDialog({
       }
 
       const res = await api.createSandbox(body)
+      // If the user picked a local folder, upload it after the sandbox
+      // reaches Running. We block the dialog (showing upload progress)
+      // so the user knows the import is still in flight.
+      if (importFiles.length > 0) {
+        try {
+          setImporting({ done: 0, total: importFiles.length })
+          await waitForRunning(res.id)
+          await uploadInBatches(res.id, importFiles, importTarget || "/workspace", (done, total) =>
+            setImporting({ done, total })
+          )
+        } finally {
+          setImporting(null)
+        }
+      }
       return res.id
     },
     onError: (err: unknown) => setError((err as Error).message),
@@ -272,6 +337,85 @@ export default function CreateSandboxDialog({
                 placeholder={"KEY=value\nDEBUG=1"}
                 className="font-mono text-xs"
               />
+            </div>
+
+            <div className="grid gap-2 rounded-md border bg-muted/30 p-3">
+              <Label className="flex items-center gap-1 text-sm">
+                <FolderUp className="h-4 w-4" /> Import a local folder
+              </Label>
+              <p className="text-xs text-muted-foreground">
+                Pick a directory on your machine — every file is uploaded into
+                the sandbox once it reaches Running, preserving the directory
+                structure. Great for spinning up an existing project.
+              </p>
+              <input
+                ref={folderInputRef}
+                type="file"
+                className="hidden"
+                // @ts-expect-error — Chromium/Edge proprietary attribute used to
+                // turn this <input> into a directory picker.
+                webkitdirectory=""
+                directory=""
+                multiple
+                onChange={(e) => {
+                  const list = e.target.files
+                  if (!list) return
+                  setImportFiles(Array.from(list))
+                }}
+              />
+              <div className="flex flex-wrap items-center gap-2">
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={() => folderInputRef.current?.click()}
+                  disabled={createMut.isPending}
+                >
+                  <FolderUp className="mr-1 h-3.5 w-3.5" /> Choose folder
+                </Button>
+                {importFiles.length > 0 && (
+                  <>
+                    <Input
+                      className="h-8 max-w-[16rem] text-xs"
+                      value={importTarget}
+                      onChange={(e) => setImportTarget(e.target.value)}
+                      placeholder="/workspace"
+                    />
+                    <span className="text-xs text-muted-foreground">
+                      {importFiles.length} file
+                      {importFiles.length === 1 ? "" : "s"} ·{" "}
+                      {formatBytes(importFiles.reduce((s, f) => s + f.size, 0))}
+                    </span>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="ghost"
+                      className="text-destructive"
+                      onClick={() => {
+                        setImportFiles([])
+                        if (folderInputRef.current) folderInputRef.current.value = ""
+                      }}
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </Button>
+                  </>
+                )}
+              </div>
+              {importing && (
+                <div className="mt-1 space-y-1">
+                  <div className="h-1.5 w-full overflow-hidden rounded-full bg-muted">
+                    <div
+                      className="h-full bg-primary transition-all"
+                      style={{
+                        width: `${Math.min(100, (importing.done / importing.total) * 100)}%`,
+                      }}
+                    />
+                  </div>
+                  <div className="text-[11px] text-muted-foreground">
+                    Uploading {importing.done} / {importing.total}…
+                  </div>
+                </div>
+              )}
             </div>
           </TabsContent>
 
@@ -440,4 +584,15 @@ function updateAt<T>(setter: (fn: (prev: T[]) => T[]) => void, idx: number, next
 function updateAt<T>(setter: React.Dispatch<React.SetStateAction<T[]>>, idx: number, next: T): void
 function updateAt<T>(setter: any, idx: number, next: T) {
   setter((prev: T[]) => prev.map((v, i) => (i === idx ? next : v)))
+}
+
+function formatBytes(n: number) {
+  if (!Number.isFinite(n) || n <= 0) return "0 B"
+  const units = ["B", "KB", "MB", "GB"]
+  let i = 0
+  while (n >= 1024 && i < units.length - 1) {
+    n /= 1024
+    i++
+  }
+  return `${n.toFixed(i === 0 ? 0 : 1)} ${units[i]}`
 }

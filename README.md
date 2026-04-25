@@ -94,7 +94,53 @@ The Go binary serves four groups of routes on the same port:
 | `/sandbox-proxy/<id>/port/<port>/…`                 | Reverse proxy (HTTP/WS) to any port in the sandbox             |
 | `/`                                                 | Compiled React SPA                                             |
 
-## Quick start
+## Quick start (recommended): docker compose
+
+The repo ships a compose stack that brings up the OpenSandbox lifecycle
+server, the panel, and pre-builds the all-in-one sandbox image:
+
+```bash
+docker compose up -d --build
+```
+
+The stack starts three things:
+
+| Service                | What it does                                          |
+| ---------------------- | ----------------------------------------------------- |
+| `opensandbox-server`   | Python FastAPI lifecycle server (Docker runtime).     |
+| `osbui-sandbox-image-build` | Side-car that builds `osbui/dev:latest` from `sandbox-images/dev/Dockerfile`, then exits. The "OpenSandbox Dev (all-in-one)" template uses this image. |
+| `osbui-panel`          | The management UI (Go binary + compiled SPA).         |
+
+Once the panel container reports healthy, open <http://localhost:5173>.
+
+The panel is pre-wired to the bundled server, so the first-run wizard is
+skipped. Click **New sandbox**, pick the **OpenSandbox Dev** template
+(default), and you'll get a sandbox with Python 3, Node 20, npm, Yarn,
+PNPM, Git, build tools, JupyterLab, Streamlit, code-server, vim, tmux,
+PostgreSQL/Redis clients, etc. all pre-installed.
+
+### Importing a local code directory
+
+The Create-sandbox dialog has an **Import a local folder** section. Pick a
+directory on your machine — the panel waits for the sandbox to reach
+Running and then uploads every file under your chosen target (default
+`/workspace`), preserving the directory structure. Path traversal segments
+(`../`) are stripped server-side. Great for spinning up an existing
+project without committing anything.
+
+Behind the scenes:
+
+1. The browser uses `<input type="file" webkitdirectory>` to enumerate the
+   selected folder.
+2. The panel uploads files in batches of up to ~50 files / 32 MB each
+   (`POST /panel/sandboxes/<id>/files/upload` with parallel `paths[]`
+   form fields holding each file's `webkitRelativePath`).
+3. The Go backend pre-creates parent directories with `mkdir -p` and then
+   pipes each file into the execd `/files/upload` endpoint.
+
+## Quick start: manual
+
+If you'd rather not use compose:
 
 ### 1. Run the OpenSandbox server
 
@@ -114,17 +160,24 @@ OSBUI_API_KEY=local-dev-key \
 ./osbui-panel -listen 0.0.0.0:5173 -static ./frontend/dist
 ```
 
-Open <http://127.0.0.1:5173>. The first-run wizard lets you set the upstream
-URL and API key interactively if you didn't provide them on the command line.
+### 3. (Optional) build the all-in-one sandbox image
 
-### 3. Launch your first sandbox
+```bash
+docker build -t osbui/dev:latest sandbox-images/dev/
+```
 
-- Click **Templates** → **VS Code Web** → **Launch** (or click **New
-  sandbox** from the Sandboxes list).
+Open <http://127.0.0.1:5173>. The first-run wizard lets you set the
+upstream URL and API key interactively.
+
+### 4. Launch your first sandbox
+
+- Click **Templates** → pick a template → **Launch**, or click **New
+  sandbox** from the Sandboxes list and import a folder you want to
+  develop in.
 - Once the sandbox reaches **Running**, open the detail page and play with
-  the **Files**, **Terminal**, **Ports**, **Logs**, and **Metrics** tabs,
-  then hit **Open VS Code** for a full browser-based IDE backed by the
-  sandbox filesystem.
+  the **Files**, **Terminal**, **Services**, **Ports**, **Logs**, and
+  **Metrics** tabs, then hit **Open VS Code** for a full browser-based
+  IDE backed by the sandbox filesystem.
 
 ## Configuration
 

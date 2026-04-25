@@ -588,37 +588,89 @@ func uploadFile(px *proxy.Proxy, w http.ResponseWriter, r *http.Request, id stri
 		http.Error(w, "no files", http.StatusBadRequest)
 		return
 	}
+
+	// When uploading a folder via the browser's `<input webkitdirectory>`,
+	// each file's intended relative path lives in a parallel `paths[]`
+	// form value. Fall back to the bare filename otherwise.
+	relPaths := r.MultipartForm.Value["paths"]
+
+	// Pre-create unique parent directories with mkdir -p so we don't have
+	// to round-trip /directories per file.
+	dirs := map[string]struct{}{}
+	for i, fh := range files {
+		rel := fh.Filename
+		if i < len(relPaths) && relPaths[i] != "" {
+			rel = relPaths[i]
+		}
+		clean := cleanRel(rel)
+		dst := strings.TrimRight(targetDir, "/") + "/" + clean
+		parent := dst[:strings.LastIndexByte(dst, '/')]
+		if parent != "" && parent != targetDir {
+			dirs[parent] = struct{}{}
+		}
+	}
+	if len(dirs) > 0 {
+		var b strings.Builder
+		b.WriteString("mkdir -p")
+		for d := range dirs {
+			b.WriteString(" ")
+			b.WriteString(shellQuote(d))
+		}
+		_, _ = px.RunInExecd(r, id, b.String(), false, 30000)
+	}
+
 	results := []map[string]any{}
-	for _, fh := range files {
+	for i, fh := range files {
+		rel := fh.Filename
+		if i < len(relPaths) && relPaths[i] != "" {
+			rel = relPaths[i]
+		}
+		clean := cleanRel(rel)
+		dst := strings.TrimRight(targetDir, "/") + "/" + clean
+
 		f, err := fh.Open()
 		if err != nil {
-			results = append(results, map[string]any{"name": fh.Filename, "error": err.Error()})
+			results = append(results, map[string]any{"name": rel, "error": err.Error()})
 			continue
 		}
-		dst := strings.TrimRight(targetDir, "/") + "/" + fh.Filename
 		buf, ct, err := buildExecdUploadBody(
 			map[string]any{"path": dst, "mode": 644},
-			fh.Filename, f,
+			filepath.Base(dst), f,
 		)
 		f.Close()
 		if err != nil {
-			results = append(results, map[string]any{"name": fh.Filename, "error": err.Error()})
+			results = append(results, map[string]any{"name": rel, "error": err.Error()})
 			continue
 		}
 		resp, err := px.ExecdRequest(r.Context(), r, id, http.MethodPost, "/files/upload", buf, ct)
 		if err != nil {
-			results = append(results, map[string]any{"name": fh.Filename, "error": err.Error()})
+			results = append(results, map[string]any{"name": rel, "error": err.Error()})
 			continue
 		}
-		b, _ := io.ReadAll(resp.Body)
+		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			results = append(results, map[string]any{"name": fh.Filename, "error": fmt.Sprintf("status %d: %s", resp.StatusCode, string(b))})
+			results = append(results, map[string]any{"name": rel, "error": fmt.Sprintf("status %d: %s", resp.StatusCode, string(body))})
 			continue
 		}
-		results = append(results, map[string]any{"name": fh.Filename, "path": dst, "size": fh.Size})
+		results = append(results, map[string]any{"name": rel, "path": dst, "size": fh.Size})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"uploaded": results, "targetDir": targetDir})
+}
+
+// cleanRel strips any leading ./ or / and rejects path traversal segments
+// so an attacker-controlled archive can't write outside targetDir.
+func cleanRel(p string) string {
+	p = strings.TrimLeft(p, "./")
+	p = strings.ReplaceAll(p, "\\", "/")
+	parts := []string{}
+	for _, seg := range strings.Split(p, "/") {
+		if seg == "" || seg == "." || seg == ".." {
+			continue
+		}
+		parts = append(parts, seg)
+	}
+	return strings.Join(parts, "/")
 }
 
 func downloadFile(px *proxy.Proxy, w http.ResponseWriter, r *http.Request, id string) {

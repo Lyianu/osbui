@@ -1,0 +1,138 @@
+# Bring up an end-to-end OpenSandbox stack with one command:
+#
+#   docker compose up -d --build
+#
+# After both services are healthy, open <http://localhost:5173> and create
+# a sandbox. The first-run wizard is skipped because the panel is already
+# wired to the bundled OpenSandbox lifecycle server.
+#
+# What this stack contains:
+#   * opensandbox-server — Python FastAPI lifecycle server (Docker runtime).
+#                          Mounts /var/run/docker.sock so it can spawn
+#                          sandbox containers on the host.
+#   * osbui-panel       — Go binary + compiled SPA. Pre-configured to talk
+#                          to the server above.
+#   * sandbox-image-build — Side-car that builds `osbui/dev:latest` so the
+#                          "OpenSandbox Dev (all-in-one)" template is
+#                          available immediately. Exits after building.
+#
+# Linux note: `[docker].host_ip` defaults to `host.docker.internal`, which
+# resolves on Docker Desktop and is mapped to the host gateway via
+# `extra_hosts` here for native Linux. Override with `OSBUI_HOST_IP=<your-ip>`
+# if your sandboxes are unreachable through the panel.
+
+configs:
+  opensandbox-config:
+    content: |
+      [server]
+      host = "0.0.0.0"
+      port = 8080
+      api_key = "local-dev-key"
+      max_sandbox_timeout_seconds = 86400
+
+      [log]
+      level = "INFO"
+
+      [runtime]
+      type = "docker"
+      execd_image = "opensandbox/execd:v1.0.12"
+
+      [storage]
+      # `[]` means "deny all" in this server build. Allow common prefixes so
+      # the panel's "Volumes" editor works out of the box. Tighten this
+      # for production deployments.
+      allowed_host_paths = ["/tmp", "/var/folders", "/Users", "/home"]
+      volume_default_size = "1Gi"
+
+      [docker]
+      network_mode = "bridge"
+      host_ip = "${OSBUI_HOST_IP:-host.docker.internal}"
+      drop_capabilities = ["AUDIT_WRITE", "MKNOD", "NET_ADMIN", "NET_RAW", "SYS_ADMIN", "SYS_MODULE", "SYS_PTRACE", "SYS_TIME", "SYS_TTY_CONFIG"]
+      no_new_privileges = true
+      pids_limit = 4096
+      seccomp_profile = ""
+
+      [ingress]
+      mode = "direct"
+
+services:
+  # 1. OpenSandbox lifecycle server (the one the SDK / panel talks to).
+  opensandbox-server:
+    image: osbui-opensandbox-server:local
+    build:
+      context: ./server-image
+    container_name: opensandbox-server
+    restart: unless-stopped
+    networks:
+      - opensandbox-net
+    ports:
+      - "${OSBUI_SERVER_PORT:-8080}:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    configs:
+      - source: opensandbox-config
+        target: /etc/opensandbox/config.toml
+    environment:
+      - SANDBOX_CONFIG_PATH=/etc/opensandbox/config.toml
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health').read()"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+
+  # 2. Build the all-in-one sandbox image used by the "Dev" template.
+  #    Exits immediately once the image is in the Docker daemon.
+  sandbox-image-build:
+    image: docker:cli
+    container_name: osbui-sandbox-image-build
+    depends_on:
+      opensandbox-server:
+        condition: service_started
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./sandbox-images/dev:/build:ro
+    entrypoint:
+      - sh
+      - -c
+      - |
+        set -e
+        if ! docker image inspect osbui/dev:latest >/dev/null 2>&1; then
+          echo "Building osbui/dev:latest..."
+          docker build -t osbui/dev:latest /build
+        else
+          echo "osbui/dev:latest already exists; skipping build."
+        fi
+    restart: "no"
+
+  # 3. The management panel itself.
+  osbui-panel:
+    image: osbui-panel:local
+    build:
+      context: .
+    container_name: osbui-panel
+    restart: unless-stopped
+    depends_on:
+      opensandbox-server:
+        condition: service_healthy
+    networks:
+      - opensandbox-net
+    ports:
+      - "${OSBUI_PANEL_PORT:-5173}:5173"
+    extra_hosts:
+      # The OpenSandbox server hands out endpoint URLs that point at
+      # `host.docker.internal` (set via `[docker].host_ip` above) — the panel
+      # then connects to those URLs so this hostname must resolve from inside
+      # the panel container too.
+      - "host.docker.internal:host-gateway"
+    environment:
+      - OSBUI_UPSTREAM=http://opensandbox-server:8080
+      - OSBUI_API_KEY=local-dev-key
+      - OSBUI_PANEL_SECRET=${OSBUI_PANEL_SECRET:-}
+
+networks:
+  opensandbox-net:
+    driver: bridge
+    name: opensandbox-net

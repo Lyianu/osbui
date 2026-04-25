@@ -45,6 +45,16 @@ export function removeTemplate(id: string) {
 
 export const DEFAULT_TEMPLATES: SandboxTemplate[] = [
   {
+    id: "builtin-dev",
+    name: "OpenSandbox Dev (all-in-one)",
+    image: "osbui/dev:latest",
+    entrypoint: ["sleep", "infinity"],
+    cpu: "1500m",
+    memory: "2Gi",
+    timeout: 7200,
+    createdAt: 0,
+  },
+  {
     id: "builtin-vscode",
     name: "VS Code Web",
     image: "opensandbox/vscode:latest",
