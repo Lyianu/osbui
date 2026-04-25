@@ -32,6 +32,19 @@ scanning — all from one Go binary plus a shadcn/ui frontend.
 - **Templates**: built-in starter configurations plus user templates
   persisted in `localStorage`. Launch with one click from the Templates page
   or save the current sandbox as a template from its detail page.
+- **One-click services**: a Services tab inside each sandbox starts /
+  stops common dev services with the right command (JupyterLab,
+  static HTTP, code-server, Streamlit demo, PostgreSQL, Redis) and shows a
+  green "running" badge once the port is detected.
+- **Pools**: list, create, and delete Kubernetes warm pools (the panel
+  shows a friendly "Kubernetes-only feature" state when the upstream
+  runtime doesn't support pools).
+- **Multi-tab terminal**: spawn several independent bash sessions in the
+  same sandbox, switch / close tabs, each backed by its own WebSocket.
+- **Image preview** in the file browser for png/jpg/gif/webp/svg/etc.;
+  large or known-binary files are offered as direct downloads.
+- **Restore from snapshot**, network-policy editor, and volume mounts are
+  exposed in the create dialog under an Advanced tab.
 - **Runtime connection config**: change the upstream URL and API key without
   restarting the backend. Values are persisted in `localStorage`, forwarded
   to the Go server as cookies, and visualised with a live health banner.
@@ -144,7 +157,8 @@ Visit <http://127.0.0.1:5174>.
 
 ## Verified end-to-end
 
-Both E2E suites pass against a real OpenSandbox server (Docker runtime):
+Three Playwright suites pass against a real OpenSandbox server (Docker
+runtime), 28 checks in total:
 
 - **`e2e.mjs`** — create, run, pause, resume, renew, snapshot-unsupported
   handling, VS Code iframe + workbench HTML + WebSocket handshake + file
@@ -153,8 +167,12 @@ Both E2E suites pass against a real OpenSandbox server (Docker runtime):
   template-based launch, file browser create+edit+upload, git import,
   ports scanner, metrics panel, logs, terminal WebSocket round-trip,
   settings page, list-based delete.
-
-Together they exercise every page and feature listed above.
+- **`e2e3.mjs`** — pools page Kubernetes-only state, advanced create
+  dialog (network-policy editor, volumes editor, request body shape),
+  service launcher actually starts the static HTTP service and the panel
+  detects port 8000 listening, multi-tab terminal spawns extra sessions,
+  image preview renders an `<img>` for an uploaded PNG, snapshots page
+  reachable, cleanup.
 
 ## License
 

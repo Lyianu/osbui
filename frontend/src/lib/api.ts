@@ -64,6 +64,43 @@ export interface CreateSandboxRequest {
   env?: Record<string, string>
   metadata?: Record<string, string>
   entrypoint?: string[]
+  networkPolicy?: NetworkPolicy
+  volumes?: Volume[]
+}
+
+export interface NetworkPolicy {
+  defaultAction?: "allow" | "deny"
+  egress?: NetworkRule[]
+}
+
+export interface NetworkRule {
+  action: "allow" | "deny"
+  target: string
+}
+
+export interface Volume {
+  name: string
+  mountPath: string
+  readOnly?: boolean
+  subPath?: string
+  host?: { path: string }
+  pvc?: { claimName: string; createIfNotExists?: boolean; deleteOnSandboxTermination?: boolean }
+}
+
+export interface Pool {
+  name: string
+  image?: { uri: string }
+  size?: number
+  minSize?: number
+  maxSize?: number
+  resourceLimits?: Record<string, string>
+  status?: { state: string; ready?: number; size?: number; message?: string }
+  createdAt?: string
+}
+
+export interface ListPoolsResponse {
+  items: Pool[]
+  pagination?: PaginationInfo
 }
 
 export interface FileEntry {
@@ -214,6 +251,18 @@ export const api = {
     fetchJSON<{ ok: boolean; status?: number; latencyMs: number; error?: string }>(
       "/panel/upstream/health"
     ),
+
+  // Pools
+  listPools: () => fetchJSON<ListPoolsResponse>("/api/v1/pools"),
+  createPool: (body: Pool) =>
+    fetchJSON<Pool>("/api/v1/pools", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  deletePool: async (name: string) => {
+    const res = await fetch(`/api/v1/pools/${encodeURIComponent(name)}`, { method: "DELETE" })
+    if (!res.ok) throw new ApiError(res.status, await res.text())
+  },
 
   // Sandbox file/DX ops
   listFiles: (id: string, path: string) =>

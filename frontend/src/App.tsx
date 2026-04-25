@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react"
 import { NavLink, Navigate, Route, Routes, useNavigate } from "react-router-dom"
-import { Activity, BookMarked, Box, Boxes, Camera, Command, Moon, Server, Settings, Sun, SunMoon } from "lucide-react"
+import { Activity, BookMarked, Box, Boxes, Camera, Command, Layers, Moon, Server, Settings, Sun, SunMoon } from "lucide-react"
 import { cn } from "@/lib/utils"
 import SandboxesPage from "@/pages/SandboxesPage"
 import SandboxDetailPage from "@/pages/SandboxDetailPage"
@@ -9,6 +9,7 @@ import SnapshotsPage from "@/pages/SnapshotsPage"
 import SettingsPage from "@/pages/SettingsPage"
 import TemplatesPage from "@/pages/TemplatesPage"
 import SetupWizardPage from "@/pages/SetupWizardPage"
+import PoolsPage from "@/pages/PoolsPage"
 import { useTheme } from "@/components/theme-provider"
 import { Button } from "@/components/ui/button"
 import { useQuery } from "@tanstack/react-query"
@@ -65,6 +66,7 @@ export default function App() {
             <Route path="/sandboxes/:id/vscode" element={<SandboxVSCodePage />} />
             <Route path="/snapshots" element={<SnapshotsPage />} />
             <Route path="/templates" element={<TemplatesPage />} />
+            <Route path="/pools" element={<PoolsPage />} />
             <Route path="/settings" element={<SettingsPage />} />
             <Route
               path="*"
@@ -104,6 +106,9 @@ function Sidebar() {
         </SideLink>
         <SideLink to="/snapshots" icon={<Camera className="h-4 w-4" />}>
           Snapshots
+        </SideLink>
+        <SideLink to="/pools" icon={<Layers className="h-4 w-4" />}>
+          Pools
         </SideLink>
         <SideLink to="/settings" icon={<Settings className="h-4 w-4" />}>
           Settings
@@ -208,6 +213,9 @@ function Palette({
           </CommandItem>
           <CommandItem onSelect={() => go("/snapshots")}>
             <Camera className="h-4 w-4" /> Snapshots
+          </CommandItem>
+          <CommandItem onSelect={() => go("/pools")}>
+            <Layers className="h-4 w-4" /> Pools
           </CommandItem>
           <CommandItem onSelect={() => go("/settings")}>
             <Settings className="h-4 w-4" /> Settings
