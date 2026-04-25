@@ -1,0 +1,31 @@
+services:
+  panel:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        VERSION: ${VERSION:-docker}
+    image: osbui-panel:${VERSION:-latest}
+    container_name: osbui-panel
+    restart: unless-stopped
+    ports:
+      - "${OSBUI_LISTEN_PORT:-5173}:5173"
+    environment:
+      # URL of the upstream OpenSandbox lifecycle server.
+      # If you run opensandbox-server on the host, use:
+      #   OSBUI_UPSTREAM=http://host.docker.internal:8080
+      # If you run it as another compose service named e.g. `opensandbox`,
+      # use:  OSBUI_UPSTREAM=http://opensandbox:8080
+      OSBUI_UPSTREAM: ${OSBUI_UPSTREAM:-http://host.docker.internal:8080}
+      OSBUI_API_KEY: ${OSBUI_API_KEY:-}
+      OSBUI_PANEL_SECRET: ${OSBUI_PANEL_SECRET:-}
+    # host.docker.internal works out of the box on Docker Desktop;
+    # on Linux this extra_hosts entry makes it resolve to the host gateway.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:5173/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
