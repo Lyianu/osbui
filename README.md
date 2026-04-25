@@ -1,67 +1,96 @@
 # OpenSandbox Management Panel
 
-A complete, production-grade management UI for [alibaba/OpenSandbox](https://github.com/alibaba/OpenSandbox).
-It talks to the upstream OpenSandbox lifecycle server, exposes full CRUD and
-lifecycle operations for sandboxes, and embeds VS Code Web (code-server) in the
-browser for any sandbox built on the `opensandbox/vscode` image.
+A production-grade management UI for [alibaba/OpenSandbox](https://github.com/alibaba/OpenSandbox).
+It talks to the upstream OpenSandbox lifecycle server, drives the full sandbox
+lifecycle, and integrates a complete developer experience — embedded VS Code,
+a real terminal, file manager, git import, logs, metrics, and live port
+scanning — all from one Go binary plus a shadcn/ui frontend.
 
-## Highlights
+## Feature highlights
 
-- **Full sandbox lifecycle** — create, list, inspect, pause, resume, renew
-  expiration, and delete. Snapshots are surfaced when the upstream server
-  supports them.
-- **Embedded VS Code Web** — one click launches code-server inside a sandbox
-  and renders it in an iframe. WebSockets (workbench, terminal, extension
-  host) all go through the panel's reverse proxy.
-- **Clean shadcn/ui frontend** — React + TypeScript + Vite + Tailwind.
-  Components are the canonical shadcn/ui primitives, vendored into
-  `frontend/src/components/ui/`.
-- **Single binary backend** — a small Go service proxies `/api/*` to the
-  OpenSandbox server (injecting the API key), reverse-proxies per-sandbox
-  port traffic at `/sandbox-proxy/<id>/port/<port>/...`, and serves the
-  compiled frontend. WebSocket upgrades and `Origin` rewriting are handled so
-  cross-origin checks inside code-server pass.
-- **Pluggable auth** — an optional `-panel-secret` shared secret gates the
-  entire panel via the `X-Panel-Secret` header or `panel_secret` cookie.
+- **Full sandbox lifecycle**: create (with templates), list, filter, search,
+  detail, pause, resume, renew expiration, delete. Snapshots are surfaced when
+  the runtime supports them.
+- **Integrated VS Code Web**: one click starts code-server in the sandbox and
+  embeds the workbench in an iframe. WebSockets (workbench, terminal, ext host)
+  are proxied with `Origin` rewriting so code-server's same-origin check
+  passes.
+- **Interactive terminal**: in-browser xterm.js terminal attached to a
+  per-tab execd shell session, all over a single WebSocket that the panel
+  multiplexes on top of `/session/{id}/run` SSE streams.
+- **File manager**: browse any path in the sandbox, upload / download,
+  create / delete / mkdir, and edit small files in place. Mode strings and
+  mtime come straight from `find -printf`.
+- **Git import**: clone any Git URL into the sandbox. If `git` isn't
+  installed, the panel falls back to downloading a codeload tarball, so
+  this works on minimal images too.
+- **Live ports scanner**: parses `/proc/net/tcp` every few seconds and lists
+  listening TCP ports, each with a one-click open-in-new-tab proxy link.
+- **Diagnostics**: logs and events viewers with live tail + in-browser
+  filtering.
+- **Metrics**: CPU + memory panel with sparklines.
+- **Templates**: built-in starter configurations plus user templates
+  persisted in `localStorage`. Launch with one click from the Templates page
+  or save the current sandbox as a template from its detail page.
+- **Runtime connection config**: change the upstream URL and API key without
+  restarting the backend. Values are persisted in `localStorage`, forwarded
+  to the Go server as cookies, and visualised with a live health banner.
+- **First-run setup wizard** with copy-paste commands that bootstrap an
+  OpenSandbox server on the host.
+- **Command palette (⌘K)** for fast navigation between pages and sandboxes.
+- **Dark / light / system** theme toggle.
+- **Optional panel secret** (`-panel-secret` / `OSBUI_PANEL_SECRET`) that
+  gates all routes.
+
+## Screenshots
+
+See `/tmp/shot-*.png` after running `node screenshot2.mjs` locally, or walk
+through the UI yourself once the backend is running.
 
 ## Architecture
 
 ```
-              ┌──────────┐      /api/*            ┌──────────────────┐
- Browser ───► │  Panel   │ ───► (with API key) ──►│ OpenSandbox      │
-              │ (Go)     │                         │ lifecycle server │
-              │          │      /sandbox-proxy/id/port/*              │
-              │          │ ───────────────────────►ingress:<port>     │
-              │          │                         │  sidecar (44772) │
-              │  React + │ ◄─── WebSocket bidi ───►│                  │
-              │ shadcn/ui│                         │  sandbox port    │
-              └──────────┘                         └──────────────────┘
+                  /api/*                ┌──────────────────┐
+Browser ───► Panel ───► (API key) ─────►│ OpenSandbox       │
+            (Go)        injected        │ lifecycle server  │
+                                        └──────────────────┘
+             /sandbox-proxy/<id>/port/<port>/…       │
+             (HTTP + WebSocket, Origin rewrite)      ▼
+                                        ┌──────────────────┐
+             /panel/sandboxes/<id>/*    │ sandbox container│
+             (exec / files / git /      │  + execd sidecar │
+              logs / metrics / ports /  └──────────────────┘
+              vscode start, …)
+             /panel/terminal/<id>  (WebSocket → execd session)
 ```
 
-The Go binary serves three things on the same port:
+The Go binary serves four groups of routes on the same port:
 
-| Route                                     | What it does                                                  |
-| ----------------------------------------- | ------------------------------------------------------------- |
-| `/api/*`                                  | Reverse proxy to the OpenSandbox server, injects API key.     |
-| `/panel/sandboxes/<id>/vscode/start`      | Starts `code-server` inside the sandbox via the execd.        |
-| `/panel/sandboxes/<id>/exec`              | Run ad-hoc shell commands inside the sandbox.                 |
-| `/panel/sandboxes/<id>/endpoint?port=N`   | Resolve direct + proxy URLs for a sandbox port.               |
-| `/sandbox-proxy/<id>/port/<port>/...`     | Reverse proxy for HTTP and WebSocket to a sandbox port.       |
-| `/panel/config`, `/healthz`               | Panel info and health.                                        |
-| `/`                                       | Static files of the compiled frontend (SPA fallback).         |
+| Route                                               | Purpose                                                        |
+| --------------------------------------------------- | -------------------------------------------------------------- |
+| `/api/*`                                            | Reverse proxy to the OpenSandbox server, injects API key       |
+| `/panel/sandboxes/<id>/vscode/start`                | Idempotent code-server launcher                                |
+| `/panel/sandboxes/<id>/exec`                        | One-shot shell command                                         |
+| `/panel/sandboxes/<id>/git-clone`                   | git clone with tarball fallback                                |
+| `/panel/sandboxes/<id>/files`, `/files/{read,write,upload,download,mkdir}` | Filesystem ops via execd multipart |
+| `/panel/sandboxes/<id>/ports`                       | Listening TCP ports inside the sandbox                         |
+| `/panel/sandboxes/<id>/logs`, `/events`             | Diagnostics pass-through                                       |
+| `/panel/sandboxes/<id>/metrics`, `/metrics/watch`   | execd metrics, live SSE stream                                 |
+| `/panel/terminal/<id>`                              | WebSocket terminal bridging a bash session                     |
+| `/panel/upstream/health`, `/panel/config`           | Health + runtime config                                        |
+| `/sandbox-proxy/<id>/port/<port>/…`                 | Reverse proxy (HTTP/WS) to any port in the sandbox             |
+| `/`                                                 | Compiled React SPA                                             |
 
 ## Quick start
 
-### 1. Run the upstream OpenSandbox server
+### 1. Run the OpenSandbox server
 
 ```bash
 uv pip install opensandbox-server
 opensandbox-server init-config ~/.sandbox.toml --example docker
-# (optional) edit ~/.sandbox.toml to set server.api_key = "local-dev-key"
+# (optional) set server.api_key = "..." in the TOML
 opensandbox-server
 ```
-
-Server should be reachable at <http://127.0.0.1:8080>.
 
 ### 2. Build and run the panel
 
@@ -72,88 +101,60 @@ OSBUI_API_KEY=local-dev-key \
 ./osbui-panel -listen 0.0.0.0:5173 -static ./frontend/dist
 ```
 
-Open <http://127.0.0.1:5173> in your browser.
+Open <http://127.0.0.1:5173>. The first-run wizard lets you set the upstream
+URL and API key interactively if you didn't provide them on the command line.
 
-### 3. Launch VS Code in a sandbox
+### 3. Launch your first sandbox
 
-1. Click **New sandbox** and pick the **VS Code Web** preset.
-2. Once it reaches *Running*, click the **VS Code** button in the row.
-3. The panel calls the execd to launch code-server on port 8443 inside the
-   sandbox, then polls the reverse-proxy endpoint until code-server answers,
-   and finally renders the workbench in an iframe.
+- Click **Templates** → **VS Code Web** → **Launch** (or click **New
+  sandbox** from the Sandboxes list).
+- Once the sandbox reaches **Running**, open the detail page and play with
+  the **Files**, **Terminal**, **Ports**, **Logs**, and **Metrics** tabs,
+  then hit **Open VS Code** for a full browser-based IDE backed by the
+  sandbox filesystem.
 
 ## Configuration
 
-All configuration is via flags or environment variables.
+| Flag            | Env var              | Default                 |
+| --------------- | -------------------- | ----------------------- |
+| `-listen`       | —                    | `0.0.0.0:5173`          |
+| `-upstream`     | `OSBUI_UPSTREAM`     | `http://127.0.0.1:8080` |
+| `-api-key`      | `OSBUI_API_KEY`      | empty                   |
+| `-static`       | `OSBUI_STATIC`       | `./frontend/dist`       |
+| `-panel-secret` | `OSBUI_PANEL_SECRET` | empty                   |
 
-| Flag              | Env var              | Default                 | Description                                       |
-| ----------------- | -------------------- | ----------------------- | ------------------------------------------------- |
-| `-listen`         | —                    | `0.0.0.0:5173`          | Address the panel listens on.                     |
-| `-upstream`       | `OSBUI_UPSTREAM`     | `http://127.0.0.1:8080` | OpenSandbox lifecycle server URL.                 |
-| `-api-key`        | `OSBUI_API_KEY`      | empty                   | Injected into `OPEN-SANDBOX-API-KEY` header.      |
-| `-static`         | `OSBUI_STATIC`       | `./frontend/dist`       | Directory with the compiled frontend.             |
-| `-panel-secret`   | `OSBUI_PANEL_SECRET` | empty                   | Optional shared secret gating panel access.       |
-
-When `OSBUI_PANEL_SECRET` is set, every request to `/api/*`,
-`/panel/sandboxes/*`, and `/sandbox-proxy/*` must include the same value via
-the `X-Panel-Secret` header or the `panel_secret` cookie.
+Every connection value is overridable at runtime from the Settings page; the
+browser stores them in `localStorage` and sends them to the Go backend through
+cookies (`osb_upstream`, `osb_apikey`).
 
 ## Development
 
 ```bash
-# Terminal 1 — OpenSandbox server on :8080
+# Terminal 1 — OpenSandbox server
 opensandbox-server
 
-# Terminal 2 — Go backend on :5173 (rebuilds on demand)
+# Terminal 2 — Go backend (rebuilds on save)
 make dev-backend
 
-# Terminal 3 — Vite dev server on :5174 (proxies to :5173)
+# Terminal 3 — Vite dev server (proxies /api, /panel, /sandbox-proxy)
 make dev-frontend
 ```
 
-Visit <http://127.0.0.1:5174> during development — Vite takes care of HMR.
+Visit <http://127.0.0.1:5174>.
 
-## Project layout
+## Verified end-to-end
 
-```
-backend/
-  main.go
-  internal/
-    config/      config struct passed around the server
-    proxy/       upstream + per-sandbox reverse proxy, execd bridge
-    server/      HTTP routes, SPA fallback, auth middleware
-frontend/
-  src/
-    components/ui/   shadcn/ui primitives (button, card, dialog, toast, …)
-    components/      CreateSandboxDialog, ConfirmDeleteDialog
-    pages/           SandboxesPage, SandboxDetailPage, SandboxVSCodePage,
-                    SnapshotsPage, SettingsPage
-    hooks/use-toast.ts
-    lib/api.ts       strongly-typed OpenSandbox client + panel endpoints
-    lib/utils.ts     cn(), shortId(), formatDate/Relative
-Makefile             build / run / dev recipes
-```
+Both E2E suites pass against a real OpenSandbox server (Docker runtime):
 
-## How the VS Code launcher works
+- **`e2e.mjs`** — create, run, pause, resume, renew, snapshot-unsupported
+  handling, VS Code iframe + workbench HTML + WebSocket handshake + file
+  write/read through exec, delete.
+- **`e2e2.mjs`** — panel loads, dark mode toggle, command palette,
+  template-based launch, file browser create+edit+upload, git import,
+  ports scanner, metrics panel, logs, terminal WebSocket round-trip,
+  settings page, list-based delete.
 
-The OpenSandbox server exposes a per-sandbox *ingress proxy* port (typically
-`44772` inside the container) that forwards `/proxy/<port>/...` to any port
-inside the sandbox.  The panel's `/sandbox-proxy/<id>/port/<port>/...` is a
-thin reverse proxy in front of that ingress with two important fix-ups:
-
-1. **Origin rewriting** — code-server rejects WebSocket upgrades whose
-   `Origin` header doesn't match the `Host`.  The panel sets the outgoing
-   `Origin` to the ingress origin, so the workbench WebSocket and terminal
-   PTY connections succeed.
-2. **Absolute `Location` rewriting** — if the upstream returns an absolute
-   redirect pointing into `/proxy/<port>/...`, the panel rewrites it to
-   `/sandbox-proxy/<id>/port/<port>/...` so the browser stays on the panel
-   origin.
-
-`POST /panel/sandboxes/<id>/vscode/start` is an idempotent helper: it checks
-`pgrep code-server` inside the sandbox and, if not running, spawns
-`code-server --bind-addr 0.0.0.0:8443 --auth none /workspace` in the
-background via the execd's `/command` endpoint.
+Together they exercise every page and feature listed above.
 
 ## License
 

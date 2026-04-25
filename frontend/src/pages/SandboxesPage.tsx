@@ -1,7 +1,7 @@
-import { useState } from "react"
+import { useMemo, useState } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { Link, useNavigate } from "react-router-dom"
-import { MoreHorizontal, PlayCircle, Plus, RefreshCw, Trash2 } from "lucide-react"
+import { Box, MoreHorizontal, PlayCircle, Plus, RefreshCw, Search, Trash2 } from "lucide-react"
 import {
   Select,
   SelectContent,
@@ -33,16 +33,20 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
+import { Input } from "@/components/ui/input"
+import { Skeleton } from "@/components/ui/skeleton"
 import { api, stateTone, type Sandbox } from "@/lib/api"
 import { formatRelative, shortId } from "@/lib/utils"
 import { useToast } from "@/hooks/use-toast"
 import CreateSandboxDialog from "@/components/CreateSandboxDialog"
 import ConfirmDeleteDialog from "@/components/ConfirmDeleteDialog"
+import { CopyButton } from "@/components/CopyButton"
 
 export default function SandboxesPage() {
   const [stateFilter, setStateFilter] = useState<string>("all")
   const [createOpen, setCreateOpen] = useState(false)
   const [toDelete, setToDelete] = useState<Sandbox | null>(null)
+  const [search, setSearch] = useState("")
   const { toast } = useToast()
   const qc = useQueryClient()
   const navigate = useNavigate()
@@ -64,36 +68,34 @@ export default function SandboxesPage() {
       qc.invalidateQueries({ queryKey: ["sandboxes"] })
     },
     onError: (err: unknown) => {
-      toast({
-        title: "Delete failed",
-        description: (err as Error).message,
-        variant: "destructive",
-      })
+      toast({ title: "Delete failed", description: (err as Error).message, variant: "destructive" })
     },
   })
-
   const pauseMut = useMutation({
     mutationFn: (id: string) => api.pauseSandbox(id),
-    onSuccess: () => {
-      toast({ title: "Pause requested" })
-      qc.invalidateQueries({ queryKey: ["sandboxes"] })
-    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["sandboxes"] }),
     onError: (err: unknown) =>
       toast({ title: "Pause failed", description: (err as Error).message, variant: "destructive" }),
   })
   const resumeMut = useMutation({
     mutationFn: (id: string) => api.resumeSandbox(id),
-    onSuccess: () => {
-      toast({ title: "Resume requested" })
-      qc.invalidateQueries({ queryKey: ["sandboxes"] })
-    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["sandboxes"] }),
     onError: (err: unknown) =>
-      toast({
-        title: "Resume failed",
-        description: (err as Error).message,
-        variant: "destructive",
-      }),
+      toast({ title: "Resume failed", description: (err as Error).message, variant: "destructive" }),
   })
+
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase()
+    if (!q) return data?.items || []
+    return (data?.items || []).filter((s) => {
+      const name = (s.metadata?.name || "").toLowerCase()
+      return (
+        s.id.toLowerCase().includes(q) ||
+        name.includes(q) ||
+        (s.image?.uri || "").toLowerCase().includes(q)
+      )
+    })
+  }, [data, search])
 
   return (
     <div className="flex h-full flex-col gap-6 p-8">
@@ -104,7 +106,16 @@ export default function SandboxesPage() {
             Create, inspect, and manage OpenSandbox instances.
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="relative">
+            <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              placeholder="Search name, image or id"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              className="pl-7 w-64"
+            />
+          </div>
           <Select value={stateFilter} onValueChange={setStateFilter}>
             <SelectTrigger className="w-[160px]">
               <SelectValue placeholder="All states" />
@@ -133,7 +144,11 @@ export default function SandboxesPage() {
         <CardHeader className="pb-3">
           <CardTitle className="text-base">Instances</CardTitle>
           <CardDescription>
-            {data ? `${data.pagination.totalItems} total` : "Loading…"}
+            {data
+              ? `${filtered.length}${
+                  data.pagination.totalItems !== filtered.length ? ` of ${data.pagination.totalItems}` : ""
+                } ${filtered.length === 1 ? "sandbox" : "sandboxes"}`
+              : "Loading…"}
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -155,13 +170,15 @@ export default function SandboxesPage() {
             </TableHeader>
             <TableBody>
               {isLoading ? (
-                <TableRow>
-                  <TableCell colSpan={6} className="py-10 text-center text-muted-foreground">
-                    Loading sandboxes…
-                  </TableCell>
-                </TableRow>
-              ) : data?.items && data.items.length > 0 ? (
-                data.items.map((s) => (
+                Array.from({ length: 3 }).map((_, i) => (
+                  <TableRow key={i}>
+                    <TableCell colSpan={6}>
+                      <Skeleton className="h-6 w-full" />
+                    </TableCell>
+                  </TableRow>
+                ))
+              ) : filtered.length > 0 ? (
+                filtered.map((s) => (
                   <SandboxRow
                     key={s.id}
                     sandbox={s}
@@ -173,8 +190,32 @@ export default function SandboxesPage() {
                 ))
               ) : (
                 <TableRow>
-                  <TableCell colSpan={6} className="py-10 text-center text-muted-foreground">
-                    No sandboxes yet. Click “New sandbox” to create one.
+                  <TableCell colSpan={6} className="py-16">
+                    <div className="flex flex-col items-center justify-center gap-2 text-center">
+                      <div className="flex h-12 w-12 items-center justify-center rounded-full bg-muted">
+                        <Box className="h-5 w-5 text-muted-foreground" />
+                      </div>
+                      <div className="text-sm font-medium">
+                        {search || stateFilter !== "all"
+                          ? "No sandboxes match this filter"
+                          : "No sandboxes yet"}
+                      </div>
+                      <p className="text-xs text-muted-foreground">
+                        {search || stateFilter !== "all"
+                          ? "Clear the filter or try a different search."
+                          : "Launch a template, or create a new sandbox from scratch."}
+                      </p>
+                      {!(search || stateFilter !== "all") && (
+                        <div className="flex gap-2 pt-2">
+                          <Button size="sm" variant="outline" onClick={() => navigate("/templates")}>
+                            Browse templates
+                          </Button>
+                          <Button size="sm" onClick={() => setCreateOpen(true)}>
+                            <Plus className="mr-1 h-3.5 w-3.5" /> New sandbox
+                          </Button>
+                        </div>
+                      )}
+                    </div>
                   </TableCell>
                 </TableRow>
               )}
@@ -190,6 +231,7 @@ export default function SandboxesPage() {
           setCreateOpen(false)
           qc.invalidateQueries({ queryKey: ["sandboxes"] })
           toast({ title: "Sandbox created", description: shortId(id) })
+          navigate(`/sandboxes/${id}`)
         }}
       />
 
@@ -230,13 +272,13 @@ function SandboxRow({
   return (
     <TableRow>
       <TableCell>
-        <Link
-          to={`/sandboxes/${sandbox.id}`}
-          className="block font-medium hover:underline"
-        >
+        <Link to={`/sandboxes/${sandbox.id}`} className="block font-medium hover:underline">
           {name}
         </Link>
-        <div className="font-mono text-xs text-muted-foreground">{sandbox.id}</div>
+        <div className="flex items-center gap-1 font-mono text-xs text-muted-foreground">
+          <span>{sandbox.id}</span>
+          <CopyButton value={sandbox.id} />
+        </div>
       </TableCell>
       <TableCell>
         <Badge variant={tone as any}>{sandbox.status.state}</Badge>
@@ -244,9 +286,7 @@ function SandboxRow({
       <TableCell className="max-w-[260px] truncate text-xs">
         {sandbox.image?.uri || (sandbox.snapshotId ? `snapshot:${sandbox.snapshotId}` : "—")}
       </TableCell>
-      <TableCell className="text-sm text-muted-foreground">
-        {formatRelative(sandbox.createdAt)}
-      </TableCell>
+      <TableCell className="text-sm text-muted-foreground">{formatRelative(sandbox.createdAt)}</TableCell>
       <TableCell className="text-sm text-muted-foreground">
         {sandbox.expiresAt ? formatRelative(sandbox.expiresAt) : "manual cleanup"}
       </TableCell>

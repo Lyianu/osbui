@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import { useMutation } from "@tanstack/react-query"
 import { Loader2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
@@ -21,93 +21,56 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import { api, type CreateSandboxRequest } from "@/lib/api"
-
-interface Preset {
-  id: string
-  label: string
-  description: string
-  image: string
-  entrypoint: string[]
-  cpu: string
-  memory: string
-  metaHint?: string
-}
-
-const PRESETS: Preset[] = [
-  {
-    id: "vscode",
-    label: "VS Code Web (opensandbox/vscode)",
-    description: "Debian + code-server prewired for the panel's VS Code integration.",
-    image: "opensandbox/vscode:latest",
-    entrypoint: ["sleep", "infinity"],
-    cpu: "1000m",
-    memory: "1Gi",
-    metaHint: "Use the VS Code button after the sandbox becomes Running.",
-  },
-  {
-    id: "python",
-    label: "Python 3.11",
-    description: "Generic Python image, useful for scripting and experimentation.",
-    image: "python:3.11",
-    entrypoint: ["sleep", "infinity"],
-    cpu: "500m",
-    memory: "512Mi",
-  },
-  {
-    id: "ubuntu",
-    label: "Ubuntu 22.04",
-    description: "Minimal Ubuntu image with a long-running shell.",
-    image: "ubuntu:22.04",
-    entrypoint: ["sleep", "infinity"],
-    cpu: "500m",
-    memory: "512Mi",
-  },
-  {
-    id: "custom",
-    label: "Custom image…",
-    description: "Provide your own container image and entrypoint.",
-    image: "",
-    entrypoint: [],
-    cpu: "500m",
-    memory: "512Mi",
-  },
-]
+import { listTemplates, type SandboxTemplate } from "@/lib/templates"
 
 export default function CreateSandboxDialog({
   open,
   onOpenChange,
   onCreated,
+  prefill,
 }: {
   open: boolean
   onOpenChange: (o: boolean) => void
   onCreated: (id: string) => void
+  prefill?: SandboxTemplate
 }) {
-  const [presetId, setPresetId] = useState<string>("vscode")
-  const preset = PRESETS.find((p) => p.id === presetId)!
+  const [templates, setTemplates] = useState<SandboxTemplate[]>([])
+  const [templateId, setTemplateId] = useState<string>(prefill?.id || "builtin-vscode")
+  const selected = templates.find((t) => t.id === templateId) || templates[0]
   const [name, setName] = useState("")
-  const [image, setImage] = useState(preset.image)
-  const [entrypoint, setEntrypoint] = useState(preset.entrypoint.join(" "))
-  const [cpu, setCpu] = useState(preset.cpu)
-  const [memory, setMemory] = useState(preset.memory)
+  const [image, setImage] = useState("")
+  const [entrypoint, setEntrypoint] = useState("")
+  const [cpu, setCpu] = useState("500m")
+  const [memory, setMemory] = useState("512Mi")
   const [timeoutSec, setTimeoutSec] = useState<string>("3600")
   const [envText, setEnvText] = useState("")
   const [error, setError] = useState<string | null>(null)
 
-  // Sync fields when preset changes.
-  const applyPreset = (id: string) => {
-    setPresetId(id)
-    const p = PRESETS.find((x) => x.id === id)!
-    setImage(p.image)
-    setEntrypoint(p.entrypoint.join(" "))
-    setCpu(p.cpu)
-    setMemory(p.memory)
-  }
+  useEffect(() => {
+    setTemplates(listTemplates())
+  }, [open])
+
+  useEffect(() => {
+    const t = prefill || templates.find((t) => t.id === templateId) || templates[0]
+    if (!t) return
+    setImage(t.image)
+    setEntrypoint(t.entrypoint.join(" "))
+    setCpu(t.cpu)
+    setMemory(t.memory)
+    setTimeoutSec(t.timeout === null ? "" : String(t.timeout))
+    if (t.env) {
+      setEnvText(Object.entries(t.env).map(([k, v]) => `${k}=${v}`).join("\n"))
+    } else {
+      setEnvText("")
+    }
+    if (prefill) setTemplateId(prefill.id)
+  }, [templateId, templates, prefill])
 
   const createMut = useMutation({
     mutationFn: async (): Promise<string> => {
       const metadata: Record<string, string> = {}
       if (name.trim()) metadata.name = name.trim()
-      metadata["osbui.preset"] = presetId
+      if (selected) metadata["osbui.template"] = selected.id
 
       const env: Record<string, string> = {}
       for (const line of envText.split("\n")) {
@@ -160,43 +123,29 @@ export default function CreateSandboxDialog({
 
         <div className="grid gap-4">
           <div className="grid gap-2">
-            <Label>Preset</Label>
-            <Select value={presetId} onValueChange={applyPreset}>
+            <Label>Template</Label>
+            <Select value={templateId} onValueChange={setTemplateId}>
               <SelectTrigger>
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                {PRESETS.map((p) => (
-                  <SelectItem key={p.id} value={p.id}>
-                    {p.label}
+                {templates.map((t) => (
+                  <SelectItem key={t.id} value={t.id}>
+                    {t.name}
                   </SelectItem>
                 ))}
               </SelectContent>
             </Select>
-            <p className="text-xs text-muted-foreground">{preset.description}</p>
-            {preset.metaHint && (
-              <p className="text-xs text-muted-foreground">{preset.metaHint}</p>
-            )}
           </div>
 
           <div className="grid gap-2">
             <Label htmlFor="name">Display name (optional)</Label>
-            <Input
-              id="name"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="My sandbox"
-            />
+            <Input id="name" value={name} onChange={(e) => setName(e.target.value)} placeholder="My sandbox" />
           </div>
 
           <div className="grid gap-2">
             <Label htmlFor="image">Image URI</Label>
-            <Input
-              id="image"
-              value={image}
-              onChange={(e) => setImage(e.target.value)}
-              placeholder="python:3.11"
-            />
+            <Input id="image" value={image} onChange={(e) => setImage(e.target.value)} placeholder="python:3.11" />
           </div>
 
           <div className="grid gap-2">

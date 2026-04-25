@@ -66,6 +66,40 @@ export interface CreateSandboxRequest {
   entrypoint?: string[]
 }
 
+export interface FileEntry {
+  name: string
+  type: string
+  size: number
+  mtime: number
+  mode: string
+  isDir: boolean
+  isLink: boolean
+}
+
+export interface FileList {
+  path: string
+  entries: FileEntry[]
+}
+
+export interface Metrics {
+  cpu_count?: number
+  cpu_used_pct?: number
+  mem_total_mib?: number
+  mem_used_mib?: number
+  timestamp?: number
+}
+
+export interface DiagnosticContent {
+  sandboxId?: string
+  kind?: string
+  scope?: string
+  delivery?: string
+  content?: string
+  contentType?: string
+  contentUrl?: string
+  truncated?: boolean
+}
+
 export class ApiError extends Error {
   status: number
   payload: any
@@ -168,12 +202,89 @@ export const api = {
     if (!res.ok) throw new ApiError(res.status, await res.text())
   },
   panelConfig: () =>
-    fetchJSON<{ upstream: string; panelAuth: boolean; apiKeyInjected: boolean; version: string }>(
-      "/panel/config"
+    fetchJSON<{
+      upstream: string
+      upstreamConfig: string
+      apiKeyMasked: string
+      apiKeyDefault: boolean
+      panelAuth: boolean
+      version: string
+    }>("/panel/config"),
+  upstreamHealth: () =>
+    fetchJSON<{ ok: boolean; status?: number; latencyMs: number; error?: string }>(
+      "/panel/upstream/health"
     ),
+
+  // Sandbox file/DX ops
+  listFiles: (id: string, path: string) =>
+    fetchJSON<FileList>(
+      `/panel/sandboxes/${id}/files?path=${encodeURIComponent(path)}`
+    ),
+  readFile: async (id: string, path: string): Promise<string> => {
+    const res = await fetch(
+      `/panel/sandboxes/${id}/files/read?path=${encodeURIComponent(path)}`
+    )
+    if (!res.ok) throw new ApiError(res.status, await res.text())
+    return res.text()
+  },
+  writeFile: (id: string, path: string, content: string) =>
+    fetchJSON<{ status: string }>(`/panel/sandboxes/${id}/files/write`, {
+      method: "POST",
+      body: JSON.stringify({ path, content }),
+    }),
+  deleteFile: async (id: string, path: string, isDir = false) => {
+    const res = await fetch(
+      `/panel/sandboxes/${id}/files?path=${encodeURIComponent(path)}&isDir=${isDir ? 1 : 0}`,
+      { method: "DELETE" }
+    )
+    if (!res.ok) throw new ApiError(res.status, await res.text())
+  },
+  mkdir: (id: string, path: string) =>
+    fetchJSON<{ status: string }>(`/panel/sandboxes/${id}/files/mkdir`, {
+      method: "POST",
+      body: JSON.stringify({ path }),
+    }),
+  uploadFiles: async (id: string, targetDir: string, files: File[]) => {
+    const fd = new FormData()
+    fd.append("path", targetDir)
+    files.forEach((f) => fd.append("files", f, f.name))
+    const res = await fetch(`/panel/sandboxes/${id}/files/upload`, {
+      method: "POST",
+      body: fd,
+    })
+    if (!res.ok) throw new ApiError(res.status, await res.text())
+    return res.json() as Promise<{ uploaded: any[]; targetDir: string }>
+  },
+  downloadFileUrl: (id: string, path: string) =>
+    `/panel/sandboxes/${id}/files/download?path=${encodeURIComponent(path)}`,
+
+  gitClone: (id: string, url: string, ref?: string, target?: string) =>
+    fetchJSON<{ exitCode: number; stdout: string[]; stderr: string[]; error?: string }>(
+      `/panel/sandboxes/${id}/git-clone`,
+      {
+        method: "POST",
+        body: JSON.stringify({ url, ref, target }),
+      }
+    ),
+
+  listPorts: (id: string) =>
+    fetchJSON<{ ports: number[] }>(`/panel/sandboxes/${id}/ports`),
+  getLogs: (id: string, scope = "container") =>
+    fetchJSON<DiagnosticContent>(
+      `/panel/sandboxes/${id}/logs?scope=${encodeURIComponent(scope)}`
+    ),
+  getEvents: (id: string, scope = "runtime") =>
+    fetchJSON<DiagnosticContent>(
+      `/panel/sandboxes/${id}/events?scope=${encodeURIComponent(scope)}`
+    ),
+  getMetrics: (id: string) =>
+    fetchJSON<Metrics>(`/panel/sandboxes/${id}/metrics`),
 }
 
-export const stateTone: Record<string, "success" | "warning" | "destructive" | "secondary" | "info" | "default"> = {
+export const stateTone: Record<
+  string,
+  "success" | "warning" | "destructive" | "secondary" | "info" | "default"
+> = {
   Pending: "info",
   Running: "success",
   Pausing: "warning",

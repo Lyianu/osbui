@@ -3,6 +3,7 @@ package proxy
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,7 +20,11 @@ import (
 	"github.com/lyianu/osbui/backend/internal/config"
 )
 
-const apiKeyHeader = "OPEN-SANDBOX-API-KEY"
+const (
+	apiKeyHeader      = "OPEN-SANDBOX-API-KEY"
+	upstreamHeader    = "X-Panel-Upstream"
+	upstreamAPIHeader = "X-Panel-API-Key"
+)
 
 // Proxy wires together the upstream OpenSandbox lifecycle server and the
 // per-sandbox endpoint reverse proxies used for accessing services such as
@@ -29,19 +34,16 @@ type Proxy struct {
 	upstream  *url.URL
 	transport *http.Transport
 
-	upstreamRP *httputil.ReverseProxy
-
-	endpointCache sync.Map // key: sandboxId|port -> *endpointCacheEntry
+	endpointCache sync.Map // key: sandboxID|port -> *endpointCacheEntry
 }
 
 type endpointCacheEntry struct {
-	target  *url.URL
+	target   *url.URL
 	basePath string // e.g. "/proxy/8443" or "" for direct
 	expires  time.Time
 }
 
-// New constructs a configured proxy. It returns an error if the upstream
-// URL cannot be parsed.
+// New constructs a configured proxy.
 func New(cfg config.Config) (*Proxy, error) {
 	if cfg.Upstream == "" {
 		return nil, errors.New("upstream must be configured")
@@ -65,25 +67,59 @@ func New(cfg config.Config) (*Proxy, error) {
 			ResponseHeaderTimeout: 60 * time.Second,
 		},
 	}
-	p.upstreamRP = &httputil.ReverseProxy{
-		Transport:    p.transport,
+	return p, nil
+}
+
+// RuntimeConfig returns the effective upstream + API key for a request.
+// Per-request overrides (cookie osb_upstream / osb_apikey or header X-Panel-*)
+// take precedence over the server flags so the panel can be reconfigured at
+// runtime without a restart.
+func (p *Proxy) RuntimeConfig(r *http.Request) (upstream string, apiKey string) {
+	upstream = p.cfg.Upstream
+	apiKey = p.cfg.APIKey
+	if v := readOverride(r, "osb_upstream", upstreamHeader); v != "" {
+		upstream = strings.TrimRight(v, "/")
+	}
+	if v := readOverride(r, "osb_apikey", upstreamAPIHeader); v != "" {
+		apiKey = v
+	}
+	return
+}
+
+func readOverride(r *http.Request, cookieName, headerName string) string {
+	if c, err := r.Cookie(cookieName); err == nil && c.Value != "" {
+		return c.Value
+	}
+	if h := r.Header.Get(headerName); h != "" {
+		return h
+	}
+	return ""
+}
+
+// APIProxy proxies /api/* requests to the upstream server.
+func (p *Proxy) APIProxy(w http.ResponseWriter, r *http.Request) {
+	upstream, apiKey := p.RuntimeConfig(r)
+	u, err := url.Parse(upstream)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "bad_upstream", "message": err.Error()})
+		return
+	}
+	rp := &httputil.ReverseProxy{
+		Transport:     p.transport,
 		FlushInterval: 100 * time.Millisecond,
 		Director: func(req *http.Request) {
 			req.URL.Scheme = u.Scheme
 			req.URL.Host = u.Host
 			req.Host = u.Host
-			if cfg.APIKey != "" {
-				req.Header.Set(apiKeyHeader, cfg.APIKey)
+			if apiKey != "" {
+				req.Header.Set(apiKeyHeader, apiKey)
 			}
-			// Strip /api prefix.
 			req.URL.Path = strings.TrimPrefix(req.URL.Path, "/api")
 			if req.URL.Path == "" {
 				req.URL.Path = "/"
 			}
 		},
 		ModifyResponse: func(resp *http.Response) error {
-			// Some upstream errors use chunked; we pass through as-is but drop
-			// hop-by-hop headers.
 			resp.Header.Del("X-Frame-Options")
 			return nil
 		},
@@ -91,24 +127,19 @@ func New(cfg config.Config) (*Proxy, error) {
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "upstream_unreachable", "message": err.Error()})
 		},
 	}
-	return p, nil
+	rp.ServeHTTP(w, r)
 }
 
-// APIProxy proxies /api/* requests to the configured OpenSandbox server.
-func (p *Proxy) APIProxy(w http.ResponseWriter, r *http.Request) {
-	p.upstreamRP.ServeHTTP(w, r)
-}
-
-// DoUpstream performs a direct request to the upstream server and returns the
-// decoded JSON body or an error.
-func (p *Proxy) DoUpstream(method, path string, body io.Reader, out any) (*http.Response, error) {
-	req, err := http.NewRequest(method, p.cfg.Upstream+path, body)
+// DoUpstream issues a direct request honoring per-request config overrides.
+func (p *Proxy) DoUpstream(r *http.Request, method, path string, body io.Reader, out any) (*http.Response, error) {
+	upstream, apiKey := p.RuntimeConfig(r)
+	req, err := http.NewRequest(method, upstream+path, body)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if p.cfg.APIKey != "" {
-		req.Header.Set(apiKeyHeader, p.cfg.APIKey)
+	if apiKey != "" {
+		req.Header.Set(apiKeyHeader, apiKey)
 	}
 	client := &http.Client{Transport: p.transport, Timeout: 30 * time.Second}
 	resp, err := client.Do(req)
@@ -130,33 +161,43 @@ func (p *Proxy) DoUpstream(method, path string, body io.Reader, out any) (*http.
 	return resp, nil
 }
 
-func (p *Proxy) cacheKey(sandboxID, port string) string {
-	return sandboxID + "|" + port
+// CheckUpstream pings the upstream health endpoint.
+func (p *Proxy) CheckUpstream(r *http.Request) (status int, latencyMs int64, err error) {
+	upstream, _ := p.RuntimeConfig(r)
+	start := time.Now()
+	req, _ := http.NewRequest(http.MethodGet, upstream+"/health", nil)
+	client := &http.Client{Transport: p.transport, Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, time.Since(start).Milliseconds(), err
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body)
+	return resp.StatusCode, time.Since(start).Milliseconds(), nil
 }
 
-// resolveEndpoint asks the upstream server where the given sandbox port lives
-// and caches the resolution.
-func (p *Proxy) resolveEndpoint(sandboxID, port string) (*endpointCacheEntry, error) {
+func (p *Proxy) cacheKey(sandboxID, port string) string { return sandboxID + "|" + port }
+
+// resolveEndpoint asks the upstream server where the given sandbox port lives.
+func (p *Proxy) resolveEndpoint(r *http.Request, sandboxID, port string) (*endpointCacheEntry, error) {
 	key := p.cacheKey(sandboxID, port)
 	if v, ok := p.endpointCache.Load(key); ok {
-		entry := v.(*endpointCacheEntry)
-		if time.Now().Before(entry.expires) {
-			return entry, nil
+		e := v.(*endpointCacheEntry)
+		if time.Now().Before(e.expires) {
+			return e, nil
 		}
 	}
-
 	var payload struct {
 		Endpoint string            `json:"endpoint"`
 		Headers  map[string]string `json:"headers"`
 	}
-	resp, err := p.DoUpstream(http.MethodGet, fmt.Sprintf("/v1/sandboxes/%s/endpoints/%s", sandboxID, port), nil, &payload)
+	resp, err := p.DoUpstream(r, http.MethodGet, fmt.Sprintf("/v1/sandboxes/%s/endpoints/%s", sandboxID, port), nil, &payload)
 	if err != nil {
 		return nil, err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("upstream returned %d resolving endpoint", resp.StatusCode)
 	}
-	// payload.Endpoint may be of the form "127.0.0.1:52672" OR "127.0.0.1:52672/proxy/8443".
 	raw := payload.Endpoint
 	if !strings.Contains(raw, "://") {
 		raw = "http://" + raw
@@ -174,8 +215,7 @@ func (p *Proxy) resolveEndpoint(sandboxID, port string) (*endpointCacheEntry, er
 	return entry, nil
 }
 
-// InvalidateSandbox drops cached endpoint resolutions for a sandbox (called
-// after delete).
+// InvalidateSandbox drops cached endpoint resolutions for a sandbox.
 func (p *Proxy) InvalidateSandbox(sandboxID string) {
 	prefix := sandboxID + "|"
 	p.endpointCache.Range(func(k, _ any) bool {
@@ -187,23 +227,17 @@ func (p *Proxy) InvalidateSandbox(sandboxID string) {
 }
 
 // SandboxPortProxy reverse-proxies a request to a port inside a sandbox.
-// It expects URLs shaped like /sandbox-proxy/<id>/port/<port>/<rest>.
 func (p *Proxy) SandboxPortProxy(w http.ResponseWriter, r *http.Request) {
 	sandboxID, port, rest, ok := parseSandboxProxyPath(r.URL.Path)
 	if !ok {
 		http.Error(w, "invalid sandbox proxy path", http.StatusBadRequest)
 		return
 	}
-
-	entry, err := p.resolveEndpoint(sandboxID, port)
+	entry, err := p.resolveEndpoint(r, sandboxID, port)
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "endpoint_resolve_failed", "message": err.Error()})
 		return
 	}
-
-	// Handle WebSocket upgrade separately — httputil.ReverseProxy supports it
-	// out of the box only when Hop-by-hop headers are preserved. We let
-	// ReverseProxy handle it.
 	rp := &httputil.ReverseProxy{
 		Transport:     p.transport,
 		FlushInterval: 100 * time.Millisecond,
@@ -211,19 +245,13 @@ func (p *Proxy) SandboxPortProxy(w http.ResponseWriter, r *http.Request) {
 			req.URL.Scheme = entry.target.Scheme
 			req.URL.Host = entry.target.Host
 			req.Host = entry.target.Host
-			// rest already begins with "/" or is empty
 			if rest == "" {
 				rest = "/"
 			}
 			req.URL.Path = singleJoin(entry.basePath, rest)
-			// Rewrite Origin for same-origin checks inside services that refuse
-			// cross-origin WebSocket upgrades (notably code-server). Without
-			// this, requests from the panel's origin get 403'd at the upgrade.
 			if origin := req.Header.Get("Origin"); origin != "" {
 				req.Header.Set("Origin", entry.target.Scheme+"://"+entry.target.Host)
 			}
-			// Drop the Referer — it leaks the panel origin and is otherwise
-			// not meaningful to the sandbox.
 			req.Header.Del("Referer")
 		},
 		ModifyResponse: func(resp *http.Response) error {
@@ -240,17 +268,13 @@ func (p *Proxy) SandboxPortProxy(w http.ResponseWriter, r *http.Request) {
 	rp.ServeHTTP(w, r)
 }
 
-// parseSandboxProxyPath splits "/sandbox-proxy/<id>/port/<port>/..." into its
-// parts.
 func parseSandboxProxyPath(p string) (id, port, rest string, ok bool) {
-	// Require prefix.
 	const prefix = "/sandbox-proxy/"
 	if !strings.HasPrefix(p, prefix) {
 		return "", "", "", false
 	}
 	trimmed := p[len(prefix):]
 	segs := strings.SplitN(trimmed, "/", 4)
-	// We need at least id, "port", port.
 	if len(segs) < 3 || segs[1] != "port" {
 		return "", "", "", false
 	}
@@ -274,9 +298,6 @@ func singleJoin(a, b string) string {
 	return path.Join("/"+strings.TrimLeft(a, "/"), b)
 }
 
-// rewriteLocation rewrites absolute redirect URLs from the sandbox origin so
-// browsers stay on the panel origin. Relative paths are returned unchanged
-// because the browser resolves them against the current URL.
 func rewriteLocation(loc, upstreamBase, sandboxID, port string) string {
 	if loc == "" {
 		return loc
@@ -289,7 +310,6 @@ func rewriteLocation(loc, upstreamBase, sandboxID, port string) string {
 		p := strings.TrimPrefix(u.Path, upstreamBase)
 		return fmt.Sprintf("/sandbox-proxy/%s/port/%s%s", sandboxID, port, p)
 	}
-	// Absolute path rewrite: if upstream sends /proxy/8443/..., rewrite to our prefix.
 	if upstreamBase != "" && strings.HasPrefix(loc, upstreamBase+"/") {
 		trimmed := strings.TrimPrefix(loc, upstreamBase)
 		return fmt.Sprintf("/sandbox-proxy/%s/port/%s%s", sandboxID, port, trimmed)
@@ -304,13 +324,6 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 }
 
 // --- Execd bridge --------------------------------------------------------
-//
-// The management panel needs to issue commands (e.g. start code-server) to the
-// execd sidecar of a sandbox. The sidecar is reachable through the per-sandbox
-// ingress proxy port which the server records in sandbox metadata under the
-// key `opensandbox.io/embedding-proxy-port`. When that metadata is unavailable
-// (e.g. older server builds) we fall back to resolving any non-8080 port and
-// stripping its `/proxy/<port>` suffix to recover the execd base URL.
 
 type ExecResult struct {
 	ExitCode int      `json:"exitCode"`
@@ -319,43 +332,37 @@ type ExecResult struct {
 	Error    string   `json:"error,omitempty"`
 }
 
-// resolveExecdBase returns the scheme://host[:port] base URL that speaks the
-// execd HTTP API for the given sandbox.
-func (p *Proxy) resolveExecdBase(sandboxID string) (*url.URL, error) {
-	// First try the sandbox's metadata.
+// ResolveExecdBase returns the base URL (scheme+host) of the sandbox's execd.
+// It prefers the sandbox metadata key `opensandbox.io/embedding-proxy-port`
+// and falls back to resolving an arbitrary port and stripping the `/proxy/<p>`
+// suffix.
+func (p *Proxy) ResolveExecdBase(r *http.Request, sandboxID string) (*url.URL, error) {
 	type sandbox struct {
 		Metadata map[string]string `json:"metadata"`
 	}
 	var sb sandbox
-	resp, err := p.DoUpstream(http.MethodGet, fmt.Sprintf("/v1/sandboxes/%s", sandboxID), nil, &sb)
+	resp, err := p.DoUpstream(r, http.MethodGet, fmt.Sprintf("/v1/sandboxes/%s", sandboxID), nil, &sb)
 	if err == nil && resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		if port, ok := sb.Metadata["opensandbox.io/embedding-proxy-port"]; ok && port != "" {
-			u, err := url.Parse("http://127.0.0.1:" + port)
-			if err == nil {
+			if u, err := url.Parse("http://127.0.0.1:" + port); err == nil {
 				return u, nil
 			}
 		}
 	}
-	// Fallback: resolve a non-system port and strip /proxy/<port>.
-	entry, err := p.resolveEndpoint(sandboxID, "65535")
+	entry, err := p.resolveEndpoint(r, sandboxID, "65535")
 	if err != nil {
 		return nil, fmt.Errorf("resolve execd base: %w", err)
 	}
 	return entry.target, nil
 }
 
-// RunInExecd issues a command via the sandbox's execd. `bg=true` returns
-// immediately after the command is accepted. For foreground commands this
-// blocks until execution_complete is received or the read exceeds the timeout.
-func (p *Proxy) RunInExecd(sandboxID, command string, bg bool, timeoutMs int) (*ExecResult, error) {
-	base, err := p.resolveExecdBase(sandboxID)
+// RunInExecd issues a command via the sandbox's execd.
+func (p *Proxy) RunInExecd(r *http.Request, sandboxID, command string, bg bool, timeoutMs int) (*ExecResult, error) {
+	base, err := p.ResolveExecdBase(r, sandboxID)
 	if err != nil {
 		return nil, err
 	}
-	body := map[string]any{
-		"command":    command,
-		"background": bg,
-	}
+	body := map[string]any{"command": command, "background": bg}
 	if timeoutMs > 0 {
 		body["timeout"] = timeoutMs
 	}
@@ -376,9 +383,12 @@ func (p *Proxy) RunInExecd(sandboxID, command string, bg bool, timeoutMs int) (*
 		b, _ := io.ReadAll(resp.Body)
 		return nil, fmt.Errorf("execd returned %d: %s", resp.StatusCode, string(b))
 	}
+	return parseExecdSSE(resp.Body, bg)
+}
 
+func parseExecdSSE(body io.Reader, bg bool) (*ExecResult, error) {
 	result := &ExecResult{Stdout: []string{}, Stderr: []string{}}
-	scanner := bufio.NewScanner(resp.Body)
+	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 4096), 1024*1024)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
@@ -411,11 +421,62 @@ func (p *Proxy) RunInExecd(sandboxID, command string, bg bool, timeoutMs int) (*
 			result.Error = ev.Text
 		}
 		if bg && ev.Type == "init" {
-			// Background commands complete almost immediately after init.
+			_ = bg
 		}
 	}
-	if err := scanner.Err(); err != nil {
-		return result, err
+	return result, scanner.Err()
+}
+
+// ExecdRequest proxies a raw HTTP request to the sandbox's execd.
+func (p *Proxy) ExecdRequest(ctx context.Context, r *http.Request, sandboxID, method, path string, body io.Reader, contentType string) (*http.Response, error) {
+	base, err := p.ResolveExecdBase(r, sandboxID)
+	if err != nil {
+		return nil, err
 	}
-	return result, nil
+	target := strings.TrimRight(base.String(), "/") + path
+	req, err := http.NewRequestWithContext(ctx, method, target, body)
+	if err != nil {
+		return nil, err
+	}
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
+	client := &http.Client{Transport: p.transport, Timeout: 300 * time.Second}
+	return client.Do(req)
+}
+
+// StreamExecdSSE opens an SSE stream from the sandbox's execd and forwards
+// each event to the callback until the context is canceled or the upstream
+// closes. It returns when the upstream stream ends.
+func (p *Proxy) StreamExecdSSE(ctx context.Context, r *http.Request, sandboxID, path string, body io.Reader, onEvent func(line []byte) error) error {
+	base, err := p.ResolveExecdBase(r, sandboxID)
+	if err != nil {
+		return err
+	}
+	target := strings.TrimRight(base.String(), "/") + path
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, body)
+	if err != nil {
+		return err
+	}
+	client := &http.Client{Transport: p.transport}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		b, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("execd %s returned %d: %s", path, resp.StatusCode, string(b))
+	}
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 4096), 1024*1024)
+	for scanner.Scan() {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := onEvent(scanner.Bytes()); err != nil {
+			return err
+		}
+	}
+	return scanner.Err()
 }
